@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  # 1. MinIO: Your Document Storage
+  minio:
+    image: minio/minio:latest
+    container_name: rag_minio
+    ports:
+      - "9000:9000" # API Port
+      - "9001:9001" # Web UI Port
+    environment:
+      MINIO_ROOT_USER: admin_user
+      MINIO_ROOT_PASSWORD: admin_password_123
+    command: server /data --console-address ":9001"
+
+  # 2. NATS Jetstream: Your Message Broker
+  nats:
+    image: nats:latest
+    container_name: rag_nats
+    ports:
+      - "4222:4222" # Client Port
+      - "8222:8222" # Management UI
+    command: -js # This flag enables Jetstream (persistence)
+  # 3. ChromaDB: Your Vector Store
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: rag_chroma
+    ports:
+      - "8001:8000" # Mapping local 8001 to Chroma's internal 8000
