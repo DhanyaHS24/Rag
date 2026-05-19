@@ -1,29 +1,155 @@
-version: '3.8'
-
 services:
-  # 1. MinIO: Your Document Storage
-  minio:
-    image: minio/minio:latest
-    container_name: rag_minio
-    ports:
-      - "9000:9000" # API Port
-      - "9001:9001" # Web UI Port
-    environment:
-      MINIO_ROOT_USER: admin_user
-      MINIO_ROOT_PASSWORD: admin_password_123
-    command: server /data --console-address ":9001"
+minio:
+image: minio/minio:latest
 
-  # 2. NATS Jetstream: Your Message Broker
-  nats:
-    image: nats:latest
-    container_name: rag_nats
-    ports:
-      - "4222:4222" # Client Port
-      - "8222:8222" # Management UI
-    command: -js # This flag enables Jetstream (persistence)
-  # 3. ChromaDB: Your Vector Store
-  chroma:
-    image: chromadb/chroma:latest
-    container_name: rag_chroma
-    ports:
-      - "8001:8000" # Mapping local 8001 to Chroma's internal 8000
+expose:  
+  - "9000"  
+  - "9001"  
+environment:  
+  MINIO_ROOT_USER: admin_user  
+  MINIO_ROOT_PASSWORD: admin_password_123  
+command: server /data --console-address ":9001"  
+volumes:  
+  - minio_data:/data
+
+nats:
+image: nats:latest
+
+expose:  
+  - "4222"  
+  - "8222"  
+command: -js
+
+chromadb:
+image: chromadb/chroma:latest
+
+expose:  
+  - "8000"  
+volumes:  
+  - chroma_data:/chroma/chroma
+
+mongodb:
+image: mongo:7
+container_name: rag_mongodb
+expose:
+- "27017"
+volumes:
+- mongo_data:/data/db
+
+garnet:
+image: ghcr.io/microsoft/garnet:latest
+container_name: rag_garnet
+expose:
+- "6379"
+volumes:
+- garnet_data:/data
+ulimits:
+memlock: -1
+restart: unless-stopped
+extra_hosts:
+- "host.docker.internal:host-gateway"
+
+upload_service:
+build:
+context: .
+dockerfile: services/upload_service/Dockerfile
+
+ports:  
+  - "${UPLOAD_SERVICE_PORT:-8004}:8000"  
+expose:  
+  - "8000"  
+depends_on:  
+  - minio  
+  - nats  
+  - mongodb  
+environment:  
+  MINIO_URL: minio:9000  
+  MINIO_ACCESS_KEY: admin_user  
+  MINIO_SECRET_KEY: admin_password_123  
+  NATS_URL: nats://nats:4222  
+  MONGO_URL: mongodb://mongodb:27017  
+restart: unless-stopped
+
+ingestion_service:
+build:
+context: .
+dockerfile: services/ingestion_service/Dockerfile
+
+depends_on:  
+  - minio  
+  - nats  
+  - chromadb  
+  - mongodb  
+environment:  
+  MINIO_URL: minio:9000  
+  MINIO_ACCESS_KEY: admin_user  
+  MINIO_SECRET_KEY: admin_password_123  
+  NATS_URL: nats://nats:4222  
+  CHROMA_URL: chromadb  
+  CHROMA_PORT: 8000  
+  MONGO_URL: mongodb://mongodb:27017  
+  EMBEDDING_BACKEND: local  
+  GEMINI_API_KEY: AIzaSyDgfIuKM7hKmX6os3twEh9itVq8ABeRdZk  
+restart: unless-stopped
+
+retrieval_service:
+build:
+context: .
+dockerfile: services/retrieval_service/Dockerfile
+
+ports:  
+  - "8005:8002"  
+expose:  
+  - "8002"  
+depends_on:  
+  - chromadb  
+  - mongodb  
+  - garnet  
+environment:  
+  CHROMA_URL: chromadb  
+  CHROMA_PORT: 8000  
+  MONGO_URL: mongodb://mongodb:27017  
+  GARNET_URL: garnet:6379  
+  EMBEDDING_BACKEND: local  
+  GEMINI_API_KEY: AIzaSyDgfIuKM7hKmX6os3twEh9itVq8ABeRdZk  
+restart: unless-stopped
+
+user_service:
+build:
+context: .
+dockerfile: services/user_service/Dockerfile
+
+ports:  
+  - "8003:8003"  
+expose:  
+  - "8003"  
+depends_on:  
+  - mongodb  
+environment:  
+  MONGO_URL: mongodb://mongodb:27017  
+  DB_NAME: rag_users  
+restart: unless-stopped
+
+frontend:
+build: ./frontend
+ports:
+- "8502:8501"
+volumes:
+- ./frontend/user_data.json:/app/user_data.json
+extra_hosts:
+- "host.docker.internal:host-gateway"
+depends_on:
+- upload_service
+- retrieval_service
+- user_service
+environment:
+BACKEND_UPLOAD_URL: http://upload_service:8000/upload
+BACKEND_CHAT_URL: http://retrieval_service:8002/chat
+BACKEND_USER_URL: http://user_service:8003
+restart: unless-stopped
+
+volumes:
+minio_data:
+chroma_data:
+mongo_data:
+garnet_data:
