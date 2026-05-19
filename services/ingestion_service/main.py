@@ -1,199 +1,157 @@
-from shared.embeddings import get_collection_name
-from shared.embeddings import embed_documents
-from shared.db_logger import log_action, generate_cid
+import os
+import sys
+import io
 import asyncio
+from typing import Optional
+
 import nats
 from minio import Minio
 import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-import requests
-import time
-import sys
-import os
-import io
-from typing import List
 from pypdf import PdfReader
 
-sys.path.insert(0, os.path.join(os.path.dirname(file), ".."))
+from shared.embeddings import get_collection_name, embed_documents
+from shared.db_logger import log_action, generate_cid
 
-MONGO_URL_ENV = os.getenv("MONGO_URL", "mongodb://mongodb:27017")
+
 NATS_URL = os.getenv("NATS_URL", "nats://nats:4222")
 MINIO_URL = os.getenv("MINIO_URL", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin_user")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "admin_password_123")
-BUCKET_NAME = "raw-documents"
+BUCKET_NAME = os.getenv("MINIO_BUCKET", "raw-documents")
+
 CHROMA_URL = os.getenv("CHROMA_URL", "chromadb")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", 8000))
-COLLECTION_NAME = get_collection_name()
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+
+
+COLLECTION_NAME = get_collection_name("documents")
 
 minio_client = Minio(MINIO_URL, MINIO_ACCESS_KEY,
                      MINIO_SECRET_KEY, secure=False)
 
 
-async def connect_nats_with_retry():
-last_error = None
-for _ in range(30):
-try:
-return await nats.connect(NATS_URL)
-except Exception as exc:
-last_error = exc
-print(f"[!] Waiting for NATS... {exc}", file=sys.stderr)
-await asyncio.sleep(2)
-raise RuntimeError(f"Could not connect to NATS: {last_error}")
+def get_collection() -> chromadb.api.models.Collection.Collection:
+    client = chromadb.HttpClient(host=CHROMA_URL, port=CHROMA_PORT)
+    # create_collection is idempotent in practice, but we guard with get_collection.
+    try:
+        return client.get_collection(name=COLLECTION_NAME)
+    except Exception:
+        return client.create_collection(name=COLLECTION_NAME)
 
 
-def get_collection():
-
-
-chroma_client = chromadb.HttpClient(host=CHROMA_URL, port=CHROMA_PORT)
-for _ in range(30):
-try:
-try:
-collection = chroma_client.get_collection(name=COLLECTION_NAME)
-return collection
-except Exception as e:
-if "does not exist" in str(e).lower():
-return chroma_client.create_collection(name=COLLECTION_NAME)
-raise
-except Exception as e:
-print(f"[!] Waiting for ChromaDB... {e}", file=sys.stderr)
-time.sleep(2)
-raise Exception("Could not connect to ChromaDB")
+async def connect_nats_with_retry(max_tries: int = 30, sleep_s: float = 2.0) -> nats.aio.client.Client:
+    last_exc: Optional[Exception] = None
+    for _ in range(max_tries):
+        try:
+            return await nats.connect(NATS_URL)
+        except Exception as exc:  # pragma: no cover
+            last_exc = exc
+            await asyncio.sleep(sleep_s)
+    raise RuntimeError(f"Could not connect to NATS: {last_exc}")
 
 
 def load_document_text(file_id: str) -> str:
+    response = minio_client.get_object(BUCKET_NAME, file_id)
+    try:
+        data = response.read()
+        lower = file_id.lower()
+
+        if lower.endswith(".pdf") or ".pdf" in lower:
+            reader = PdfReader(io.BytesIO(data))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            return "\n".join(pages).strip()
+
+        return data.decode("utf-8", errors="ignore").strip()
+
+    finally:
+        response.close()
+        response.release_conn()
 
 
-response = minio_client.get_object(BUCKET_NAME, file_id)
-try:
-if file_id.lower().endswith(".pdf") or ".pdf" in file_id.lower():
-reader = PdfReader(io.BytesIO(response.read()))
-pages = [page.extract_text() or "" for page in reader.pages]
-return "\n".join(pages).strip()
-
-raw_bytes = response.read()
-return raw_bytes.decode("utf-8", errors="ignore").strip()
-finally:
-    response.close()
-    response.release_conn()
-
-
-async def process_document(file_id: str, collection, cid: str = None):
-corr_id = cid or generate_cid()
-print(f"[*] Processing: {file_id}", file=sys.stderr)
-
-log_action(
-    service="ingestion_service",
-    action="processing_started",
-    payload={"file_id": file_id},
-    correlation_id=corr_id,
-    status="started",
-)
-
-try:
-    content = load_document_text(file_id)
-    if not content:
-        raise ValueError("Document content is empty after extraction")
-    print(f"[*] Downloaded content ({len(content)} chars)", file=sys.stderr)
-
+async def process_document(file_id: str, collection, cid: Optional[str] = None):
+    corr_id = cid or generate_cid()
     log_action(
         service="ingestion_service",
-        action="minio_downloaded",
-        payload={"file_id": file_id, "content_length": len(content)},
+        action="processing_started",
+        payload={"file_id": file_id},
         correlation_id=corr_id,
-        status="success",
+        status="started",
     )
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500, chunk_overlap=100)
-    chunks = splitter.split_text(content)
-    if not chunks:
-        raise ValueError("No text chunks could be extracted from the document")
-    print(f"[*] Split into {len(chunks)} chunks", file=sys.stderr)
+    try:
+        content = load_document_text(file_id)
+        if not content:
+            raise ValueError("Document content is empty after extraction")
 
-    ids = [f"{file_id}_{i}" for i in range(len(chunks))]
-    metadatas = [{"source": file_id} for _ in chunks]
-    embeddings = embed_documents(chunks)
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500, chunk_overlap=50)
+        chunks = splitter.split_text(content)
+        if not chunks:
+            raise ValueError(
+                "No text chunks could be extracted from the document")
 
-    collection.add(
-        documents=chunks,
-        ids=ids,
-        metadatas=metadatas,
-        embeddings=embeddings,
-    )
-    print(f"[+] Ingested {len(chunks)} chunks", file=sys.stderr)
+        ids = [f"{file_id}_{i}" for i in range(len(chunks))]
+        metadatas = [{"source": file_id}] * len(chunks)
+        embeddings = embed_documents(chunks)
 
-    log_action(
-        service="ingestion_service",
-        action="chromadb_ingested",
-        payload={
-            "file_id": file_id,
-            "chunks_count": len(chunks),
-            "chunk_ids": ids[:5],
-        },
-        correlation_id=corr_id,
-        status="success",
-    )
-
-except Exception as e:
-    import traceback
-
-    print(f"[!] Error: {e}", file=sys.stderr)
-    traceback.print_exc()
-
-    log_action(
-        service="ingestion_service",
-        action="processing_error",
-        payload={"file_id": file_id, "error": str(e)},
-        correlation_id=corr_id,
-        status="failed",
-        error=str(e),
-    )
-
-
-async def main():
-nc = await connect_nats_with_retry()
-print("[!] Ingestion Service started", file=sys.stderr)
-print("[*] Waiting for ChromaDB to be ready...", file=sys.stderr)
-collection = get_collection()
-print("[+] ChromaDB collection ready", file=sys.stderr)
-
-log_action(
-    service="ingestion_service",
-    action="service_started",
-    payload={"nats_url": NATS_URL, "chromadb_ready": True},
-    status="success",
-)
-
-
-async def handler(msg):
-    data = msg.data.decode()
-    if data.startswith("NEW_FILE:"):
-        parts = data.split(":")
-        file_id = parts[1] if len(parts) > 1 else ""
-        cid = parts[2] if len(parts) > 2 else None
-        await process_document(file_id, collection, cid)
+        # Add is safe; Chroma will error on duplicates depending on configuration.
+        # For production, you might implement delete-by-source before add.
+        collection.add(
+            documents=chunks,
+            ids=ids,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
 
         log_action(
             service="ingestion_service",
-            action="nats_message_received",
-            payload={"channel": "document.uploaded", "file_id": file_id},
-            correlation_id=cid,
+            action="chromadb_ingested",
+            payload={"file_id": file_id, "chunks_count": len(chunks)},
+            correlation_id=corr_id,
             status="success",
         )
 
-sub = await nc.subscribe("document.uploaded", cb=handler)
-print("[*] Subscribed to document.uploaded", file=sys.stderr)
+    except Exception as e:
+        log_action(
+            service="ingestion_service",
+            action="processing_error",
+            payload={"file_id": file_id, "error": str(e)},
+            correlation_id=corr_id,
+            status="failed",
+            error=str(e),
+        )
+        raise
 
-print("[*] Waiting for messages...", file=sys.stderr)
-while True:
-    try:
+
+async def handler(collection, msg):
+    data = msg.data.decode("utf-8")
+    if not data.startswith("NEW_FILE:"):
+        return
+
+    parts = data.split(":")
+    file_id = parts[1] if len(parts) > 1 else ""
+    cid = parts[2] if len(parts) > 2 else None
+
+    await process_document(file_id, collection, cid=cid)
+
+
+async def main():
+    collection = get_collection()
+    nc = await connect_nats_with_retry()
+
+    log_action(
+        service="ingestion_service",
+        action="service_started",
+        payload={"nats_url": NATS_URL, "chromadb_collection": COLLECTION_NAME},
+        correlation_id=generate_cid(),
+        status="success",
+    )
+
+    await nc.subscribe("document.uploaded", cb=lambda msg: handler(collection, msg))
+
+    while True:
         await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        break
 
-await nc.drain()
-await nc.close()
 
-if name == "main":
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

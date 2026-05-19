@@ -1,133 +1,119 @@
+import os
+import hashlib
+
+import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
-from typing import List, Optional
-import redis.asyncio as redis
 from motor.motor_asyncio import AsyncIOMotorClient
-import chromadb
-from chromadb.utils import embedding_functions
-import google.generativeai as genai
-import json
-import hashlib
-from datetime import datetime
 
-# --- Configuration ---
-GARNET_URL = "redis://localhost:3278"  # Garnet uses the Redis protocol
-MONGO_URL = "mongodb://localhost:27017"
-CHROMA_URL = "localhost"
-CHROMA_PORT = 8001
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"  # Replace with your actual key
+from shared.db_logger import log_action, generate_cid
 
-# --- Initialize Clients ---
+from .rag_engine import get_relevant_chunks, generate_response, is_greeting
+
+
+GARNET_URL = os.getenv("GARNET_URL", "garnet:6379")
+# Most Redis-compatible caches expose as redis://host:port
+GARNET_URL = os.getenv("GARNET_URL", "garnet:6379")
+if not GARNET_URL.startswith("redis://"):
+    GARNET_URL = f"redis://{GARNET_URL}"
+
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongodb:27017")
+
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+
 app = FastAPI(title="Retrieval Service")
+
 cache = redis.from_url(GARNET_URL)
+
 mongo_client = AsyncIOMotorClient(MONGO_URL)
-db = mongo_client.rag_audit
-logs_collection = db.chat_logs
-
-# ChromaDB Client
-chroma_client = chromadb.HttpClient(host=CHROMA_URL, port=CHROMA_PORT)
-emb_fn = embedding_functions.DefaultEmbeddingFunction()
-collection = chroma_client.get_or_create_collection(
-    name="documents", embedding_function=emb_fn)
-
-# Gemini Client
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
-
-# --- Data Models ---
+db = mongo_client[os.getenv("AUDIT_DB", "rag_audit")]
+logs_collection = db[os.getenv("AUDIT_COLLECTION", "chat_logs")]
 
 
 class ChatRequest(BaseModel):
     query: str
-    selected_docs: Optional[List[str]] = []
-
-# --- Background Task: Audit Logging ---
-# We run this in the background so the user doesn't wait for the database write
+    selected_docs: list[str] = []
 
 
-async def log_to_mongo(query: str, answer: str, cache_hit: bool):
-    log_entry = {
-        "timestamp": datetime.utcnow(),
+async def log_to_mongo(query: str, answer: str, cache_hit: bool, cid: str):
+    # Use UTC timestamps; don't block request.
+    doc = {
+        "timestamp": __import__("datetime").datetime.utcnow(),
         "query": query,
         "answer": answer,
-        "cache_hit": cache_hit
+        "cache_hit": cache_hit,
+        "correlation_id": cid,
     }
-    await logs_collection.insert_one(log_entry)
-    print("[*] Interaction logged to MongoDB")
-
-# --- Main Endpoint ---
+    await logs_collection.insert_one(doc)
 
 
 @app.post("/chat")
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
-    try:
-        # 1. Create a unique hash for the question to use as a cache key
-        query_hash = hashlib.md5(request.query.encode()).hexdigest()
+    cid = generate_cid()
 
-        # 2. Check Garnet (Cache) first
-        cached_response = await cache.get(query_hash)
-        if cached_response:
-            print("[+] Cache HIT in Garnet")
-            answer = cached_response.decode('utf-8')
+    try:
+        query_hash = hashlib.md5(request.query.encode("utf-8")).hexdigest()
+
+        cached = await cache.get(query_hash)
+        if cached:
+            answer = cached.decode("utf-8")
             background_tasks.add_task(
-                log_to_mongo, request.query, answer, True)
+                log_to_mongo, request.query, answer, True, cid)
             return {"answer": answer, "source": "cache"}
 
-        print("[-] Cache MISS. Retrieving from ChromaDB...")
+        # Greeting shortcut
+        if is_greeting(request.query):
+            answer = (
+                "Hello. Ask me a question about the selected documents, and I’ll answer from the available context."
+            )
+            await cache.setex(query_hash, 3600, answer)
+            background_tasks.add_task(
+                log_to_mongo, request.query, answer, False, cid)
+            return {"answer": answer, "source": "system"}
 
-        # 3. Query ChromaDB for relevant document chunks
-        # If the user selected specific docs in the UI, we filter by them
-        where_clause = None
-        if request.selected_docs:
-            # Note: For multiple docs, Chroma uses a specific $in operator syntax
-            if len(request.selected_docs) == 1:
-                where_clause = {"source": request.selected_docs[0]}
-            else:
-                where_clause = {"source": {"$in": request.selected_docs}}
-
-        results = collection.query(
-            query_texts=[request.query],
-            n_results=3,  # Bring back the top 3 most relevant paragraphs
-            where=where_clause
+        contexts = get_relevant_chunks(
+            request.query,
+            request.selected_docs or [],
+            cid=cid,
         )
 
-        # Extract the text chunks from the ChromaDB response
-        retrieved_chunks = results['documents'][0] if results['documents'] else [
-        ]
+        if not contexts:
+            answer = "No relevant documents found. Upload and process some documents first."
+            await cache.setex(query_hash, 3600, answer)
+            background_tasks.add_task(
+                log_to_mongo, request.query, answer, False, cid)
+            return {"answer": answer, "source": "system"}
 
-        if not retrieved_chunks:
-            return {"answer": "I couldn't find any relevant information in your uploaded documents.", "source": "system"}
+        answer = generate_response(
+            request.query, contexts, GEMINI_API_KEY, cid=cid)
 
-        # 4. Construct the prompt for Gemini
-        context = "\n\n".join(retrieved_chunks)
-        prompt = f"""
-        You are a helpful assistant. Use ONLY the following retrieved context to answer the user's question. 
-        If the answer is not contained in the context, say "I cannot answer this based on the provided documents."
-        
-        Context:
-        {context}
-        
-        User Question: {request.query}
-        """
-
-        # 5. Call LLM
-        response = model.generate_content(prompt)
-        final_answer = response.text
-
-        # 6. Save answer back to Garnet Cache (Expire after 1 hour / 3600 seconds)
-        await cache.setex(query_hash, 3600, final_answer)
-
-        # 7. Trigger background audit log
+        await cache.setex(query_hash, 3600, answer)
         background_tasks.add_task(
-            log_to_mongo, request.query, final_answer, False)
+            log_to_mongo, request.query, answer, False, cid)
 
-        return {"answer": final_answer, "source": "llm", "context_used": retrieved_chunks}
+        return {"answer": answer, "source": "llm", "context_used": contexts}
 
     except Exception as e:
-        print(f"Error: {str(e)}")
+        log_action(
+            service="retrieval_service",
+            action="chat_error",
+            payload={"error": str(e)},
+            correlation_id=cid,
+            status="failed",
+            error=str(e),
+        )
         raise HTTPException(
             status_code=500, detail="Internal Server Error during retrieval")
 
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8002)
