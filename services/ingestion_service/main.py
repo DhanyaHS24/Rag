@@ -15,8 +15,8 @@ from shared.db_logger import log_action, generate_cid
 
 NATS_URL = os.getenv("NATS_URL", "nats://nats:4222")
 MINIO_URL = os.getenv("MINIO_URL", "minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin_user")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "admin_password_123")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
 BUCKET_NAME = os.getenv("MINIO_BUCKET", "raw-documents")
 
 CHROMA_URL = os.getenv("CHROMA_URL", "chromadb")
@@ -35,10 +35,9 @@ def get_collection() -> chromadb.api.models.Collection.Collection:
     for _ in range(30):
         try:
             return client.get_or_create_collection(name=COLLECTION_NAME)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             last_exc = exc
             import time
-
             time.sleep(2)
     raise RuntimeError(f"Could not connect to ChromaDB: {last_exc}")
 
@@ -48,7 +47,7 @@ async def connect_nats_with_retry(max_tries: int = 30, sleep_s: float = 2.0) -> 
     for _ in range(max_tries):
         try:
             return await nats.connect(NATS_URL)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             last_exc = exc
             await asyncio.sleep(sleep_s)
     raise RuntimeError(f"Could not connect to NATS: {last_exc}")
@@ -72,18 +71,18 @@ def load_document_text(file_id: str) -> str:
         response.release_conn()
 
 
-async def process_document(file_id: str, collection, cid: Optional[str] = None):
+async def process_document(file_id: str, username: str, collection, cid: Optional[str] = None):
     corr_id = cid or generate_cid()
     log_action(
         service="ingestion_service",
         action="processing_started",
-        payload={"file_id": file_id},
+        payload={"file_id": file_id, "username": username},
         correlation_id=corr_id,
         status="started",
     )
 
     try:
-        content = load_document_text(file_id)
+        content = await asyncio.to_thread(load_document_text, file_id)
         if not content:
             raise ValueError("Document content is empty after extraction")
 
@@ -95,15 +94,30 @@ async def process_document(file_id: str, collection, cid: Optional[str] = None):
                 "No text chunks could be extracted from the document")
 
         ids = [f"{file_id}_{i}" for i in range(len(chunks))]
-        metadatas = [{"source": file_id}] * len(chunks)
-        embeddings = embed_documents(chunks)
+        metadatas = [{"source": file_id, "username": username}] * len(chunks)
+        embeddings = await asyncio.to_thread(embed_documents, chunks)
 
         try:
-            collection.delete(where={"source": file_id})
-        except Exception:
-            pass
+            await asyncio.to_thread(
+                collection.delete,
+                where={
+                    "$and": [
+                        {"source": file_id},
+                        {"username": username}
+                    ]
+                }
+            )
+        except Exception as e:
+            log_action(
+                service="ingestion_service",
+                action="delete_previous_chunks_error",
+                payload={"file_id": file_id, "username": username, "error": str(e)},
+                correlation_id=corr_id,
+                status="warning",
+            )
 
-        collection.add(
+        await asyncio.to_thread(
+            collection.add,
             documents=chunks,
             ids=ids,
             metadatas=metadatas,
@@ -113,7 +127,7 @@ async def process_document(file_id: str, collection, cid: Optional[str] = None):
         log_action(
             service="ingestion_service",
             action="chromadb_ingested",
-            payload={"file_id": file_id, "chunks_count": len(chunks)},
+            payload={"file_id": file_id, "chunks_count": len(chunks), "username": username},
             correlation_id=corr_id,
             status="success",
         )
@@ -130,34 +144,98 @@ async def process_document(file_id: str, collection, cid: Optional[str] = None):
         raise
 
 
+async def delete_document_from_chroma(file_id: str, username: str, collection, cid: str):
+    log_action(
+        service="ingestion_service",
+        action="delete_started",
+        payload={"file_id": file_id, "username": username},
+        correlation_id=cid,
+        status="started",
+    )
+    try:
+        await asyncio.to_thread(
+            collection.delete,
+            where={
+                "$and": [
+                    {"source": file_id},
+                    {"username": username}
+                ]
+            }
+        )
+        log_action(
+            service="ingestion_service",
+            action="chromadb_deleted",
+            payload={"file_id": file_id, "username": username},
+            correlation_id=cid,
+            status="success",
+        )
+    except Exception as e:
+        log_action(
+            service="ingestion_service",
+            action="delete_error",
+            payload={"file_id": file_id, "error": str(e)},
+            correlation_id=cid,
+            status="failed",
+            error=str(e),
+        )
+        raise
+
+
 async def handler(collection, msg):
     data = msg.data.decode("utf-8")
-    if not data.startswith("NEW_FILE:"):
-        return
-
     parts = data.split(":")
-    file_id = parts[1] if len(parts) > 1 else ""
-    cid = parts[2] if len(parts) > 2 else None
+    prefix = parts[0] if parts else ""
 
-    await process_document(file_id, collection, cid=cid)
+    if prefix == "NEW_FILE":
+        file_id = parts[1] if len(parts) > 1 else ""
+        cid = parts[2] if len(parts) > 2 else None
+        username = parts[3] if len(parts) > 3 else ""
+        try:
+            await process_document(file_id, username, collection, cid=cid)
+        except Exception:
+            pass
+    elif prefix == "DELETE_FILE":
+        file_id = parts[1] if len(parts) > 1 else ""
+        cid = parts[2] if len(parts) > 2 else None
+        username = parts[3] if len(parts) > 3 else ""
+        try:
+            await delete_document_from_chroma(file_id, username, collection, cid=cid or generate_cid())
+        except Exception:
+            pass
+
+    try:
+        await msg.ack()
+    except Exception:
+        pass
 
 
 async def main():
     collection = get_collection()
     nc = await connect_nats_with_retry()
 
+    js = nc.jetstream()
+    stream_name = "document_events"
+    subject = "document.uploaded"
+
+    try:
+        await js.add_stream(name=stream_name, subjects=[subject])
+    except Exception:
+        pass
+
+    sub = await js.subscribe(subject, stream=stream_name, manual_ack=True)
+
     log_action(
         service="ingestion_service",
         action="service_started",
-        payload={"nats_url": NATS_URL, "chromadb_collection": COLLECTION_NAME},
+        payload={"nats_url": NATS_URL, "chromadb_collection": COLLECTION_NAME,
+                 "stream": stream_name, "subject": subject},
         correlation_id=generate_cid(),
         status="success",
     )
 
-    await nc.subscribe("document.uploaded", cb=lambda msg: handler(collection, msg))
-
-    while True:
-        await asyncio.sleep(1)
+    async for msg in sub.messages:
+        task = asyncio.create_task(handler(collection, msg))
+        task.add_done_callback(lambda t: t.exception() if t.exception() else None)
 
 
 if __name__ == "__main__":

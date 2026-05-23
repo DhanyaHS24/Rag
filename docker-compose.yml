@@ -3,8 +3,8 @@ services:
     image: minio/minio:RELEASE.2024-05-10T01-41-38Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin_user}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change_me_minio_password}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
       - "${MINIO_API_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -73,11 +73,13 @@ services:
       - mongodb
     environment:
       MINIO_URL: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-admin_user}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change_me_minio_password}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-raw-documents}
       NATS_URL: nats://nats:4222
       MONGO_URL: mongodb://mongodb:27017
+      JWT_SECRET: ${JWT_SECRET}
+      FRONTEND_URL: http://localhost:8502
     restart: unless-stopped
 
   ingestion_service:
@@ -91,8 +93,8 @@ services:
       - mongodb
     environment:
       MINIO_URL: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-admin_user}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change_me_minio_password}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-raw-documents}
       NATS_URL: nats://nats:4222
       CHROMA_URL: chromadb
@@ -120,6 +122,7 @@ services:
       EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-local}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
+      JWT_SECRET: ${JWT_SECRET}
     restart: unless-stopped
 
   user_service:
@@ -133,6 +136,7 @@ services:
     environment:
       MONGO_URL: mongodb://mongodb:27017
       DB_NAME: rag_users
+      JWT_SECRET: ${JWT_SECRET}
     restart: unless-stopped
 
   frontend:

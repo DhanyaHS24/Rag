@@ -3,11 +3,12 @@ import os
 from datetime import datetime, timezone
 
 import redis.asyncio as redis
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
 from rag_engine import get_relevant_chunks, generate_response, is_greeting
+from shared.auth import get_current_user
 from shared.db_logger import generate_cid, log_action
 
 
@@ -50,7 +51,11 @@ def cache_key(request: ChatRequest) -> str:
 
 
 @app.post("/chat")
-async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
+async def chat(
+    request: ChatRequest,
+    background_tasks: BackgroundTasks,
+    username: str = Depends(get_current_user),
+):
     cid = generate_cid()
 
     try:
@@ -66,9 +71,10 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             background_tasks.add_task(log_to_mongo, request.query, answer, False, cid)
             return {"answer": answer, "source": "system", "correlation_id": cid}
 
-        contexts = get_relevant_chunks(
+        contexts = await get_relevant_chunks(
             request.query,
             request.selected_docs or [],
+            username=username,
             cid=cid,
         )
 
@@ -78,7 +84,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             background_tasks.add_task(log_to_mongo, request.query, answer, False, cid)
             return {"answer": answer, "source": "system", "correlation_id": cid}
 
-        answer = generate_response(request.query, contexts, GEMINI_API_KEY, cid=cid)
+        answer = await generate_response(request.query, contexts, GEMINI_API_KEY, cid=cid)
         await cache.setex(key, CACHE_TTL_SECONDS, answer)
         background_tasks.add_task(log_to_mongo, request.query, answer, False, cid)
 

@@ -1,6 +1,6 @@
 import os
-import hashlib
-from typing import List, Optional, Dict, Any
+import asyncio
+from typing import List, Optional
 
 import chromadb
 import google.generativeai as genai
@@ -12,11 +12,8 @@ from shared.db_logger import log_action
 CHROMA_URL = os.getenv("CHROMA_URL", "chromadb")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-
 COLLECTION_NAME = get_collection_name("documents")
 
-# Chroma client and collection (embedding function is handled by passing query embeddings)
 _client = chromadb.HttpClient(host=CHROMA_URL, port=CHROMA_PORT)
 _collection = _client.get_or_create_collection(name=COLLECTION_NAME)
 
@@ -36,28 +33,33 @@ def is_greeting(text: str) -> bool:
     return any(t.startswith(g) for g in greetings)
 
 
-def get_relevant_chunks(query: str, selected_docs: Optional[List[str]], cid: str) -> List[str]:
-    # Chroma "where" filtering is driver/version-dependent. To keep it robust,
-    # we do filtering at app level after querying by embedding.
-    q_emb = embed_query(query)
+async def get_relevant_chunks(query: str, selected_docs: Optional[List[str]], username: str, cid: str) -> List[str]:
+    q_emb = await asyncio.to_thread(embed_query, query)
 
-    where = None
     if selected_docs:
-        # Chroma expects a Mongo-like filter; $in support may vary.
-        # We'll attempt it, but if it fails, we fall back to unfiltered results.
         if len(selected_docs) == 1:
-            where = {"source": selected_docs[0]}
+            where = {
+                "$and": [
+                    {"source": selected_docs[0]},
+                    {"username": username}
+                ]
+            }
         else:
-            where = {"source": {"$in": selected_docs}}
+            where = {
+                "$and": [
+                    {"source": {"$in": selected_docs}},
+                    {"username": username}
+                ]
+            }
+    else:
+        where = {"username": username}
 
-    try:
-        res = _collection.query(
-            query_embeddings=[q_emb],
-            n_results=5,
-            where=where,
-        )
-    except Exception:
-        res = _collection.query(query_embeddings=[q_emb], n_results=5)
+    res = await asyncio.to_thread(
+        _collection.query,
+        query_embeddings=[q_emb],
+        n_results=5,
+        where=where,
+    )
 
     docs = res.get("documents", [[]])[0] if res else []
     return docs[:3]
@@ -70,7 +72,7 @@ def _generate_with_gemini(prompt: str, api_key: str) -> str:
     return model.generate_content(prompt).text
 
 
-def generate_response(query: str, contexts: List[str], api_key: str, cid: str) -> str:
+async def generate_response(query: str, contexts: List[str], api_key: str, cid: str) -> str:
     context = "\n\n".join(contexts)
 
     prompt = (
@@ -80,12 +82,11 @@ def generate_response(query: str, contexts: List[str], api_key: str, cid: str) -
         f"User Question: {query}\n"
     )
 
-    # If no Gemini key is set, return a deterministic fallback.
     if not api_key:
         return "I cannot answer this based on the provided documents."
 
     try:
-        answer = _generate_with_gemini(prompt, api_key)
+        answer = await asyncio.to_thread(_generate_with_gemini, prompt, api_key)
         return answer.strip()
     except Exception as e:
         log_action(

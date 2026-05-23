@@ -1,10 +1,12 @@
 import os
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from pymongo import MongoClient
 
+logger = logging.getLogger(__name__)
 
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongodb:27017")
 AUDIT_DB = os.getenv("AUDIT_DB", "rag_audit")
@@ -51,7 +53,12 @@ def log_action(
         "error": error,
     }
 
+    logger.info("AUDIT: %s/%s [%s] %s", service, action, status, correlation_id or "")
+
     try:
         get_audit_collection().insert_one(log_entry)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("Failed to write audit log to MongoDB: %s", exc)
+
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler())

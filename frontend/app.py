@@ -1,14 +1,11 @@
 import os
 import time
 import uuid
-import json
 import re
 import requests
 import streamlit as st
 
-# --------------------
-# Config
-# --------------------
+
 st.set_page_config(page_title="RAG Assistant", page_icon="🤖", layout="wide")
 
 BACKEND_UPLOAD_URL = os.getenv(
@@ -16,13 +13,12 @@ BACKEND_UPLOAD_URL = os.getenv(
 BACKEND_CHAT_URL = os.getenv("BACKEND_CHAT_URL", "http://localhost:8002/chat")
 BACKEND_USER_URL = os.getenv("BACKEND_USER_URL", "http://localhost:8003")
 
-# --------------------
-# Session State
-# --------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
     st.session_state.username = ""
+if "token" not in st.session_state:
+    st.session_state.token = ""
 if "chat_sessions" not in st.session_state:
     st.session_state.chat_sessions = []
 if "current_session_id" not in st.session_state:
@@ -97,79 +93,6 @@ def inject_theme_styles(theme_mode: str) -> None:
 
 inject_theme_styles(get_theme_mode())
 
-# --------------------
-# Helpers
-# --------------------
-AUTH_STORE_PATH = os.path.join(os.path.dirname(__file__), "user_data.json")
-
-DEFAULT_LOCAL_USERS = {
-    "admin": {"password": "admin123"},
-    "testuser": {"password": "1234"},
-}
-
-
-def _normalize_user_record(record: dict) -> dict:
-    if not isinstance(record, dict):
-        record = {}
-    return {
-        "password": record.get("password", ""),
-        "chat_sessions": record.get("chat_sessions", []),
-        "uploaded_docs": record.get("uploaded_docs", []),
-        "upload_events": record.get("upload_events", []),
-    }
-
-
-def load_local_users() -> dict:
-    try:
-        with open(AUTH_STORE_PATH, "r", encoding="utf-8") as f:
-            users = json.load(f)
-        if not isinstance(users, dict):
-            users = {}
-    except (FileNotFoundError, json.JSONDecodeError):
-        users = {}
-
-    normalized = {u: _normalize_user_record(r) for u, r in users.items()}
-    for u, defaults in DEFAULT_LOCAL_USERS.items():
-        normalized.setdefault(u, _normalize_user_record({}))
-        normalized[u].setdefault("password", defaults["password"])
-        normalized[u].setdefault("chat_sessions", [])
-        normalized[u].setdefault("uploaded_docs", [])
-        normalized[u].setdefault("upload_events", [])
-    return normalized
-
-
-def save_local_users(users: dict) -> None:
-    with open(AUTH_STORE_PATH, "w", encoding="utf-8") as f:
-        json.dump(users, f, indent=2)
-
-
-def persist_local_user(
-    username: str,
-    password=None,
-    chat_sessions=None,
-    uploaded_docs=None,
-    upload_events=None,
-):
-    users = load_local_users()
-    record = _normalize_user_record(users.get(username, {}))
-
-    if password is not None:
-        record["password"] = password
-    if chat_sessions is not None:
-        record["chat_sessions"] = chat_sessions
-    if uploaded_docs is not None:
-        record["uploaded_docs"] = uploaded_docs
-    if upload_events is not None:
-        record["upload_events"] = upload_events
-
-    users[username] = record
-    save_local_users(users)
-    return record
-
-
-def get_local_user(username: str) -> dict | None:
-    return load_local_users().get(username)
-
 
 def request_user_service(method: str, endpoint: str, data=None, timeout: int = 8):
     base_urls = []
@@ -183,12 +106,16 @@ def request_user_service(method: str, endpoint: str, data=None, timeout: int = 8
     for base_url in dict.fromkeys(base_urls):
         url = f"{base_url}{endpoint}"
         try:
+            headers = {}
+            token = st.session_state.get("token", "")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             if method == "GET":
-                return requests.get(url, timeout=timeout)
+                return requests.get(url, headers=headers, timeout=timeout)
             if method == "POST":
-                return requests.post(url, json=data, timeout=timeout)
+                return requests.post(url, json=data, headers=headers, timeout=timeout)
             if method == "PUT":
-                return requests.put(url, json=data, timeout=timeout)
+                return requests.put(url, json=data, headers=headers, timeout=timeout)
             st.error(f"Unsupported API method: {method}")
             return None
         except requests.RequestException as exc:
@@ -204,6 +131,7 @@ def login_or_register(username: str, password: str):
         "POST", "/login", data={"username": username, "password": password}, timeout=8)
     if resp is not None and resp.ok:
         payload = resp.json()
+        token = payload.get("token", "")
         uploaded_docs = [doc.get("file_id") for doc in payload.get(
             "documents", []) if doc.get("file_id")]
         upload_events = [
@@ -218,17 +146,8 @@ def login_or_register(username: str, password: str):
             for doc in payload.get("documents", [])
             if doc.get("file_id")
         ]
-        persist_local_user(username, password=password, chat_sessions=payload.get(
+        set_authenticated_user(username, token=token, chat_sessions=payload.get(
             "chat_sessions", []), uploaded_docs=uploaded_docs, upload_events=upload_events)
-        set_authenticated_user(username, chat_sessions=payload.get(
-            "chat_sessions", []), uploaded_docs=uploaded_docs, upload_events=upload_events)
-        return
-
-    # Local fallback keeps development usable if the user service is unavailable.
-    local_user = get_local_user(username)
-    if local_user and local_user.get("password") == password:
-        set_authenticated_user(username, chat_sessions=local_user.get("chat_sessions", []), uploaded_docs=local_user.get(
-            "uploaded_docs", []), upload_events=local_user.get("upload_events", []))
         return
 
     st.error("Incorrect username/password")
@@ -238,23 +157,20 @@ def register_user(username: str, password: str):
     resp = request_user_service(
         "POST", "/register", data={"username": username, "password": password}, timeout=8)
     if resp is not None and resp.ok:
-        persist_local_user(username, password=password,
-                           chat_sessions=[], uploaded_docs=[], upload_events=[])
-        set_authenticated_user(username)
+        payload = resp.json()
+        token = payload.get("token", "")
+        set_authenticated_user(username, token=token, chat_sessions=[], uploaded_docs=[], upload_events=[])
         return
 
     if resp is not None:
         st.error(f"Sign up failed: {resp.text}")
         return
 
-    persist_local_user(username, password=password,
-                       chat_sessions=[], uploaded_docs=[], upload_events=[])
-    set_authenticated_user(username)
 
-
-def set_authenticated_user(username: str, chat_sessions=None, uploaded_docs=None, upload_events=None):
+def set_authenticated_user(username: str, token: str = "", chat_sessions=None, uploaded_docs=None, upload_events=None):
     st.session_state.logged_in = True
     st.session_state.username = username
+    st.session_state.token = token
     st.session_state.chat_sessions = chat_sessions or []
     st.session_state.uploaded_docs = uploaded_docs or []
     st.session_state.upload_events = upload_events or []
@@ -264,13 +180,6 @@ def set_authenticated_user(username: str, chat_sessions=None, uploaded_docs=None
     else:
         create_new_chat()
 
-    persist_local_user(
-        username,
-        chat_sessions=st.session_state.chat_sessions,
-        uploaded_docs=st.session_state.uploaded_docs,
-        upload_events=st.session_state.upload_events,
-        password=(get_local_user(username) or {}).get("password", ""),
-    )
     st.rerun()
 
 
@@ -285,29 +194,12 @@ def create_new_chat():
     st.session_state.current_session_id = new_session["id"]
     st.session_state.upload_widget_nonce += 1
 
-    persist_local_user(
-        st.session_state.username,
-        chat_sessions=st.session_state.chat_sessions,
-        uploaded_docs=st.session_state.uploaded_docs,
-        upload_events=st.session_state.upload_events,
-        password=(get_local_user(st.session_state.username)
-                  or {}).get("password", ""),
-    )
-
 
 def logout():
-    if st.session_state.username:
-        persist_local_user(
-            st.session_state.username,
-            chat_sessions=st.session_state.chat_sessions,
-            uploaded_docs=st.session_state.uploaded_docs,
-            upload_events=st.session_state.upload_events,
-            password=(get_local_user(st.session_state.username)
-                      or {}).get("password", ""),
-        )
-
+    save_chat_to_backend()
     st.session_state.logged_in = False
     st.session_state.username = ""
+    st.session_state.token = ""
     st.session_state.chat_sessions = []
     st.session_state.current_session_id = None
     st.session_state.uploaded_docs = []
@@ -361,9 +253,18 @@ def upload_to_backend(uploaded_file):
     files = {"file": (uploaded_file.name,
                       uploaded_file.getvalue(), uploaded_file.type)}
     try:
-        response = requests.post(BACKEND_UPLOAD_URL, files=files, timeout=60)
+        headers = {}
+        token = st.session_state.get("token", "")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        response = requests.post(BACKEND_UPLOAD_URL, files=files, headers=headers, timeout=60)
     except requests.exceptions.ConnectionError:
         st.error("Could not connect to Upload Service")
+        return False
+
+    if response.status_code == 401:
+        st.error("Session expired. Please log in again.")
+        logout()
         return False
 
     if response.status_code != 200:
@@ -375,6 +276,14 @@ def upload_to_backend(uploaded_file):
 
     if file_id not in st.session_state.uploaded_docs:
         st.session_state.uploaded_docs.append(file_id)
+
+    current_selected = get_current_selected_docs()
+    if file_id not in current_selected:
+        current_selected.append(file_id)
+        set_current_selected_docs(current_selected)
+
+    widget_key = f"selected_docs_{st.session_state.current_session_id}"
+    st.session_state[widget_key] = list(current_selected)
 
     st.session_state.upload_events.insert(
         0,
@@ -388,24 +297,22 @@ def upload_to_backend(uploaded_file):
         },
     )
 
-    persist_local_user(
-        st.session_state.username,
-        chat_sessions=st.session_state.chat_sessions,
-        uploaded_docs=st.session_state.uploaded_docs,
-        upload_events=st.session_state.upload_events,
-        password=(get_local_user(st.session_state.username)
-                  or {}).get("password", ""),
-    )
-
     return True
 
 
 def query_retrieval_service(query: str, selected_docs: list[str]):
     payload = {"query": query, "selected_docs": selected_docs}
     try:
-        response = requests.post(BACKEND_CHAT_URL, json=payload, timeout=60)
+        headers = {}
+        token = st.session_state.get("token", "")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        response = requests.post(BACKEND_CHAT_URL, json=payload, headers=headers, timeout=60)
     except requests.exceptions.ConnectionError:
         return "Could not connect to Retrieval Service"
+
+    if response.status_code == 401:
+        return "Session expired. Please log in again."
 
     if response.status_code != 200:
         return f"Error: {response.text}"
@@ -437,9 +344,6 @@ def save_chat_to_backend():
     )
 
 
-# --------------------
-# UI
-# --------------------
 if not st.session_state.logged_in:
     palette = THEME_PALETTES[get_theme_mode()]
     st.title("🔮 RAG Assistant")
@@ -517,11 +421,13 @@ else:
                         st.rerun()
 
         if st.session_state.uploaded_docs:
+            widget_key = f"selected_docs_{st.session_state.current_session_id}"
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = get_current_selected_docs()
             selected_docs = st.multiselect(
                 "Select sources for this chat:",
                 st.session_state.uploaded_docs,
-                default=get_current_selected_docs(),
-                key=f"selected_docs_{st.session_state.current_session_id}",
+                key=widget_key,
             )
             set_current_selected_docs(selected_docs)
         else:
@@ -531,7 +437,6 @@ else:
         if st.button("Log out", use_container_width=True):
             logout()
 
-    # Main chat area
     st.title("💬 Document Chat")
 
     current_chat = get_current_chat_history()
