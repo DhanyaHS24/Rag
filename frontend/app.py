@@ -12,7 +12,7 @@ import streamlit as st
 st.set_page_config(page_title="RAG Assistant", page_icon="🤖", layout="wide")
 
 BACKEND_UPLOAD_URL = os.getenv(
-    "BACKEND_UPLOAD_URL", "http://localhost:8000/upload")
+    "BACKEND_UPLOAD_URL", "http://localhost:8004/upload")
 BACKEND_CHAT_URL = os.getenv("BACKEND_CHAT_URL", "http://localhost:8002/chat")
 BACKEND_USER_URL = os.getenv("BACKEND_USER_URL", "http://localhost:8003")
 
@@ -172,7 +172,6 @@ def get_local_user(username: str) -> dict | None:
 
 
 def request_user_service(method: str, endpoint: str, data=None, timeout: int = 8):
-    # In this repo, user_service may not be fully implemented; keep robust fallbacks.
     base_urls = []
     env_url = os.getenv("BACKEND_USER_URL", BACKEND_USER_URL).rstrip("/")
     if env_url:
@@ -201,14 +200,6 @@ def request_user_service(method: str, endpoint: str, data=None, timeout: int = 8
 
 
 def login_or_register(username: str, password: str):
-    # Local fallback auth (production-ready user_service integration is not guaranteed in this repo).
-    local_user = get_local_user(username)
-    if local_user and local_user.get("password") == password:
-        set_authenticated_user(username, chat_sessions=local_user.get("chat_sessions", []), uploaded_docs=local_user.get(
-            "uploaded_docs", []), upload_events=local_user.get("upload_events", []))
-        return
-
-    # Optional: try user_service if reachable.
     resp = request_user_service(
         "POST", "/login", data={"username": username, "password": password}, timeout=8)
     if resp is not None and resp.ok:
@@ -233,7 +224,32 @@ def login_or_register(username: str, password: str):
             "chat_sessions", []), uploaded_docs=uploaded_docs, upload_events=upload_events)
         return
 
+    # Local fallback keeps development usable if the user service is unavailable.
+    local_user = get_local_user(username)
+    if local_user and local_user.get("password") == password:
+        set_authenticated_user(username, chat_sessions=local_user.get("chat_sessions", []), uploaded_docs=local_user.get(
+            "uploaded_docs", []), upload_events=local_user.get("upload_events", []))
+        return
+
     st.error("Incorrect username/password")
+
+
+def register_user(username: str, password: str):
+    resp = request_user_service(
+        "POST", "/register", data={"username": username, "password": password}, timeout=8)
+    if resp is not None and resp.ok:
+        persist_local_user(username, password=password,
+                           chat_sessions=[], uploaded_docs=[], upload_events=[])
+        set_authenticated_user(username)
+        return
+
+    if resp is not None:
+        st.error(f"Sign up failed: {resp.text}")
+        return
+
+    persist_local_user(username, password=password,
+                       chat_sessions=[], uploaded_docs=[], upload_events=[])
+    set_authenticated_user(username)
 
 
 def set_authenticated_user(username: str, chat_sessions=None, uploaded_docs=None, upload_events=None):
@@ -399,8 +415,26 @@ def query_retrieval_service(query: str, selected_docs: list[str]):
 
 
 def save_chat_to_backend():
-    # If user_service exists later, this can persist to Mongo.
-    return
+    if not st.session_state.username:
+        return
+    documents = [
+        {
+            "file_id": event.get("file_id", ""),
+            "filename": event.get("filename", event.get("file_id", "")),
+            "uploaded_at": event.get("uploaded_at", ""),
+        }
+        for event in st.session_state.upload_events
+    ]
+    request_user_service(
+        "PUT",
+        "/state",
+        data={
+            "username": st.session_state.username,
+            "chat_sessions": st.session_state.chat_sessions,
+            "documents": documents,
+        },
+        timeout=8,
+    )
 
 
 # --------------------
@@ -422,15 +456,12 @@ if not st.session_state.logged_in:
                 login_or_register(username, password)
 
     with tab_signup:
-        st.info("Sign up is optional. Local accounts: admin/admin123, testuser/1234")
         with st.form("signup_form"):
             new_username = st.text_input("Choose Username", key="signup_user")
             new_password = st.text_input(
                 "Choose Password", type="password", key="signup_pass")
             if st.form_submit_button("Create Account", use_container_width=True):
-                # Minimal local registration: keep it safe by not auto-creating without explicit logic in this repo.
-                st.error(
-                    "User service registration not implemented; use Sign In with existing local accounts.")
+                register_user(new_username, new_password)
 
 else:
     palette = THEME_PALETTES[get_theme_mode()]
@@ -471,7 +502,7 @@ else:
 
         uploaded_file = st.file_uploader(
             "Add Source",
-            type=["txt", "md"],
+            type=["txt", "md", "pdf"],
             label_visibility="collapsed",
             key=f"source_uploader_{st.session_state.upload_widget_nonce}",
         )

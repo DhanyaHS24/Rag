@@ -1,5 +1,4 @@
 import os
-import sys
 import io
 import asyncio
 from typing import Optional
@@ -32,11 +31,16 @@ minio_client = Minio(MINIO_URL, MINIO_ACCESS_KEY,
 
 def get_collection() -> chromadb.api.models.Collection.Collection:
     client = chromadb.HttpClient(host=CHROMA_URL, port=CHROMA_PORT)
-    # create_collection is idempotent in practice, but we guard with get_collection.
-    try:
-        return client.get_collection(name=COLLECTION_NAME)
-    except Exception:
-        return client.create_collection(name=COLLECTION_NAME)
+    last_exc: Optional[Exception] = None
+    for _ in range(30):
+        try:
+            return client.get_or_create_collection(name=COLLECTION_NAME)
+        except Exception as exc:  # pragma: no cover
+            last_exc = exc
+            import time
+
+            time.sleep(2)
+    raise RuntimeError(f"Could not connect to ChromaDB: {last_exc}")
 
 
 async def connect_nats_with_retry(max_tries: int = 30, sleep_s: float = 2.0) -> nats.aio.client.Client:
@@ -94,8 +98,11 @@ async def process_document(file_id: str, collection, cid: Optional[str] = None):
         metadatas = [{"source": file_id}] * len(chunks)
         embeddings = embed_documents(chunks)
 
-        # Add is safe; Chroma will error on duplicates depending on configuration.
-        # For production, you might implement delete-by-source before add.
+        try:
+            collection.delete(where={"source": file_id})
+        except Exception:
+            pass
+
         collection.add(
             documents=chunks,
             ids=ids,

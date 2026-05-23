@@ -1,0 +1,14 @@
+{
+  "admin": {
+    "password": "admin123",
+    "chat_sessions": [],
+    "uploaded_docs": [],
+    "upload_events": []
+  },
+  "testuser": {
+    "password": "1234",
+    "chat_sessions": [],
+    "uploaded_docs": [],
+    "upload_events": []
+  }
+}

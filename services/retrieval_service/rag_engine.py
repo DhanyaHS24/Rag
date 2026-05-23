@@ -65,7 +65,8 @@ def get_relevant_chunks(query: str, selected_docs: Optional[List[str]], cid: str
 
 def _generate_with_gemini(prompt: str, api_key: str) -> str:
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-pro")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    model = genai.GenerativeModel(model_name)
     return model.generate_content(prompt).text
 
 

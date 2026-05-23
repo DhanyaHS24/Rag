@@ -1,52 +1,52 @@
-import os
 import hashlib
+import os
+from datetime import datetime, timezone
 
 import redis.asyncio as redis
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
 
-from shared.db_logger import log_action, generate_cid
+from rag_engine import get_relevant_chunks, generate_response, is_greeting
+from shared.db_logger import generate_cid, log_action
 
-from .rag_engine import get_relevant_chunks, generate_response, is_greeting
 
-
-GARNET_URL = os.getenv("GARNET_URL", "garnet:6379")
-# Most Redis-compatible caches expose as redis://host:port
 GARNET_URL = os.getenv("GARNET_URL", "garnet:6379")
 if not GARNET_URL.startswith("redis://"):
     GARNET_URL = f"redis://{GARNET_URL}"
 
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongodb:27017")
-
-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 
 app = FastAPI(title="Retrieval Service")
+cache = redis.from_url(GARNET_URL, decode_responses=True)
 
-cache = redis.from_url(GARNET_URL)
-
-mongo_client = AsyncIOMotorClient(MONGO_URL)
+mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
 db = mongo_client[os.getenv("AUDIT_DB", "rag_audit")]
-logs_collection = db[os.getenv("AUDIT_COLLECTION", "chat_logs")]
+logs_collection = db[os.getenv("CHAT_LOG_COLLECTION", "chat_logs")]
 
 
 class ChatRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=4000)
     selected_docs: list[str] = []
 
 
-async def log_to_mongo(query: str, answer: str, cache_hit: bool, cid: str):
-    # Use UTC timestamps; don't block request.
-    doc = {
-        "timestamp": __import__("datetime").datetime.utcnow(),
-        "query": query,
-        "answer": answer,
-        "cache_hit": cache_hit,
-        "correlation_id": cid,
-    }
-    await logs_collection.insert_one(doc)
+async def log_to_mongo(query: str, answer: str, cache_hit: bool, cid: str) -> None:
+    await logs_collection.insert_one(
+        {
+            "timestamp": datetime.now(timezone.utc),
+            "query": query,
+            "answer": answer,
+            "cache_hit": cache_hit,
+            "correlation_id": cid,
+        }
+    )
+
+
+def cache_key(request: ChatRequest) -> str:
+    material = f"{request.query}|{'|'.join(sorted(request.selected_docs or []))}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 @app.post("/chat")
@@ -54,24 +54,17 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     cid = generate_cid()
 
     try:
-        query_hash = hashlib.md5(request.query.encode("utf-8")).hexdigest()
-
-        cached = await cache.get(query_hash)
+        key = cache_key(request)
+        cached = await cache.get(key)
         if cached:
-            answer = cached.decode("utf-8")
-            background_tasks.add_task(
-                log_to_mongo, request.query, answer, True, cid)
-            return {"answer": answer, "source": "cache"}
+            background_tasks.add_task(log_to_mongo, request.query, cached, True, cid)
+            return {"answer": cached, "source": "cache", "correlation_id": cid}
 
-        # Greeting shortcut
         if is_greeting(request.query):
-            answer = (
-                "Hello. Ask me a question about the selected documents, and I’ll answer from the available context."
-            )
-            await cache.setex(query_hash, 3600, answer)
-            background_tasks.add_task(
-                log_to_mongo, request.query, answer, False, cid)
-            return {"answer": answer, "source": "system"}
+            answer = "Hello. Ask me a question about the selected documents, and I'll answer from the available context."
+            await cache.setex(key, CACHE_TTL_SECONDS, answer)
+            background_tasks.add_task(log_to_mongo, request.query, answer, False, cid)
+            return {"answer": answer, "source": "system", "correlation_id": cid}
 
         contexts = get_relevant_chunks(
             request.query,
@@ -81,35 +74,37 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
 
         if not contexts:
             answer = "No relevant documents found. Upload and process some documents first."
-            await cache.setex(query_hash, 3600, answer)
-            background_tasks.add_task(
-                log_to_mongo, request.query, answer, False, cid)
-            return {"answer": answer, "source": "system"}
+            await cache.setex(key, CACHE_TTL_SECONDS, answer)
+            background_tasks.add_task(log_to_mongo, request.query, answer, False, cid)
+            return {"answer": answer, "source": "system", "correlation_id": cid}
 
-        answer = generate_response(
-            request.query, contexts, GEMINI_API_KEY, cid=cid)
+        answer = generate_response(request.query, contexts, GEMINI_API_KEY, cid=cid)
+        await cache.setex(key, CACHE_TTL_SECONDS, answer)
+        background_tasks.add_task(log_to_mongo, request.query, answer, False, cid)
 
-        await cache.setex(query_hash, 3600, answer)
-        background_tasks.add_task(
-            log_to_mongo, request.query, answer, False, cid)
+        return {
+            "answer": answer,
+            "source": "llm" if GEMINI_API_KEY else "fallback",
+            "context_used": contexts,
+            "correlation_id": cid,
+        }
 
-        return {"answer": answer, "source": "llm", "context_used": contexts}
-
-    except Exception as e:
+    except Exception as exc:
         log_action(
             service="retrieval_service",
             action="chat_error",
-            payload={"error": str(e)},
+            payload={"error": str(exc)},
             correlation_id=cid,
             status="failed",
-            error=str(e),
+            error=str(exc),
         )
-        raise HTTPException(
-            status_code=500, detail="Internal Server Error during retrieval")
+        raise HTTPException(status_code=500, detail="Internal Server Error during retrieval")
 
 
 @app.get("/health")
-async def health():
+async def health() -> dict[str, str]:
+    await cache.ping()
+    await mongo_client.admin.command("ping")
     return {"status": "healthy"}
 
 

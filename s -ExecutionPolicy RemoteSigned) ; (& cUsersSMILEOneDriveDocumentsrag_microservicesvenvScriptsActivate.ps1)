@@ -1,0 +1,24 @@
+warning: in the working copy of 'docker-compose.yml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/app.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/ingestion_service/main.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/ingestion_service/requirements.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/retrieval_service/dockerfile', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/retrieval_service/main.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/retrieval_service/rag_engine.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/retrieval_service/requirements.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/upload_service/main.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/upload_service/requirements.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'services/user_service/main.py', LF will be replaced by CRLF the next time Git touches it
+ docker-compose.yml                          | 307 [32m++++++++++++++[m[31m--------------[m
+ frontend/app.py                             |  65 [32m++++[m[31m--[m
+ frontend/requirements.txt                   |   9 [32m+[m
+ services/ingestion_service/main.py          |  23 [32m++[m[31m-[m
+ services/ingestion_service/requirements.txt |  12 [32m+[m[31m-[m
+ services/retrieval_service/dockerfile       |   4 [32m+[m[31m-[m
+ services/retrieval_service/main.py          | 117 [32m+++++[m[31m------[m
+ services/retrieval_service/rag_engine.py    |   3 [32m+[m[31m-[m
+ services/retrieval_service/requirements.txt |   9 [32m+[m
+ services/upload_service/main.py             |  39 [32m+++[m[31m-[m
+ services/upload_service/requirements.txt    |   4 [32m+[m[31m-[m
+ services/user_service/main.py               | 287 [32m+++++++++[m[31m-----------------[m
+ 12 files changed, 430 insertions(+), 449 deletions(-)

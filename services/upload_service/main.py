@@ -2,6 +2,7 @@ import os
 import uuid
 import io
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 import nats
@@ -28,6 +29,8 @@ MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin_user")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "admin_password_123")
 BUCKET_NAME = os.getenv("MINIO_BUCKET", "raw-documents")
 NATS_URL = os.getenv("NATS_URL", "nats://nats:4222")
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf"}
 
 
 minio_client = Minio(
@@ -38,9 +41,17 @@ minio_client = Minio(
 )
 
 
-def _ensure_bucket_exists() -> None:
-    if not minio_client.bucket_exists(BUCKET_NAME):
-        minio_client.make_bucket(BUCKET_NAME)
+async def _ensure_bucket_exists(max_tries: int = 30, sleep_s: float = 2.0) -> None:
+    last_exc: Optional[Exception] = None
+    for _ in range(max_tries):
+        try:
+            if not minio_client.bucket_exists(BUCKET_NAME):
+                minio_client.make_bucket(BUCKET_NAME)
+            return
+        except Exception as exc:  # pragma: no cover
+            last_exc = exc
+            await asyncio.sleep(sleep_s)
+    raise RuntimeError(f"Could not initialize MinIO bucket: {last_exc}")
 
 
 async def _connect_nats_with_retry(max_tries: int = 30, sleep_s: float = 2.0) -> nats.aio.client.Client:
@@ -56,8 +67,7 @@ async def _connect_nats_with_retry(max_tries: int = 30, sleep_s: float = 2.0) ->
 
 @app.on_event("startup")
 async def startup_event():
-    # MinIO is synchronous; keep startup simple.
-    _ensure_bucket_exists()
+    await _ensure_bucket_exists()
 
 
 @app.get("/health")
@@ -69,23 +79,28 @@ async def health():
 async def upload_document(file: UploadFile = File(...)):
     cid = generate_cid()
 
-    filename = (file.filename or "").lower()
-    if file.filename and not filename.endswith((".txt", ".md", ".pdf")):
+    original_name = Path(file.filename or "document.txt").name
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
         log_action(
             service="upload_service",
             action="upload_rejected",
-            payload={"filename": file.filename, "reason": "invalid_extension"},
+            payload={"filename": original_name, "reason": "invalid_extension"},
             correlation_id=cid,
             status="failed",
         )
         raise HTTPException(
             status_code=400, detail="Only .txt, .md, and .pdf files are allowed")
 
-    file_id = f"{uuid.uuid4()}_{file.filename or 'unknown'}"
+    file_id = f"{uuid.uuid4()}_{original_name}"
 
     try:
         content = await file.read()
         length = len(content)
+        if length == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        if length > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Uploaded file is too large")
 
         file_stream = io.BytesIO(content)
         minio_client.put_object(
@@ -101,7 +116,7 @@ async def upload_document(file: UploadFile = File(...)):
             action="file_uploaded",
             payload={
                 "file_id": file_id,
-                "filename": file.filename,
+                "filename": original_name,
                 "size": length,
                 "bucket": BUCKET_NAME,
             },
@@ -110,10 +125,12 @@ async def upload_document(file: UploadFile = File(...)):
         )
 
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         log_action(
             service="upload_service",
             action="upload_error",
-            payload={"filename": file.filename,
+            payload={"filename": original_name,
                      "file_id": file_id, "error": str(e)},
             correlation_id=cid,
             status="failed",
