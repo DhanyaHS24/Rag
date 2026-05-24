@@ -83,8 +83,206 @@ def inject_theme_styles(theme_mode: str) -> None:
     st.markdown(
         f"""
         <style>
-            .stApp {{ background: {palette['app_bg']}; color: {palette['text']}; }}
-            [data-testid='stSidebar'] {{ background: {palette['sidebar_bg']}; border-right: 1px solid {palette['border']}; }}
+            .stApp {{
+                background: {palette['app_bg']};
+                color: {palette['text']};
+            }}
+
+            header[data-testid='stHeader'],
+            [data-testid='stHeader'] {{
+                background: {palette['surface_bg']} !important;
+                color: {palette['text']} !important;
+                border-bottom: 1px solid {palette['border']} !important;
+                box-shadow: 0 1px 0 rgba(17, 24, 39, 0.03) !important;
+            }}
+
+            [data-testid='stDecoration'] {{
+                background: {palette['button_bg']} !important;
+                height: 3px !important;
+            }}
+
+            [data-testid='stToolbar'],
+            [data-testid='stToolbarActions'],
+            [data-testid='stDeployButton'],
+            [data-testid='stMainMenu'] {{
+                color: {palette['muted_text']} !important;
+            }}
+
+            [data-testid='baseButton-header'],
+            [data-testid='baseButton-headerNoPadding'] {{
+                color: {palette['muted_text']} !important;
+                background: transparent !important;
+            }}
+
+            [data-testid='stAppViewContainer'] {{
+                background: {palette['app_bg']} !important;
+            }}
+
+            [data-testid='stAppViewBlockContainer'] {{
+                padding-top: 5rem;
+                padding-bottom: 7rem;
+            }}
+
+            [data-testid='stSidebar'] {{
+                background: {palette['sidebar_bg']};
+                border-right: 1px solid {palette['border']};
+            }}
+
+            [data-testid='stSidebar'] > div {{
+                background: {palette['sidebar_bg']};
+            }}
+
+            .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+            p, .stMarkdown, .stCaption, .stSubheader {{
+                color: {palette['text']};
+            }}
+
+            .stTextInput label, .stTextArea label {{
+                color: {palette['text']} !important;
+            }}
+
+            .stTextInput input, .stTextArea textarea,
+            [data-testid='stChatInput'] textarea {{
+                background: {palette['input_bg']} !important;
+                color: {palette['text']} !important;
+                border: 1px solid {palette['border']} !important;
+                border-radius: 8px !important;
+            }}
+
+            .stTextInput input::placeholder, .stTextArea textarea::placeholder,
+            [data-testid='stChatInput'] textarea::placeholder {{
+                color: {palette['muted_text']} !important;
+                opacity: 1;
+            }}
+
+            .stButton > button {{
+                background: {palette['button_bg']};
+                color: {palette['button_text']};
+                border: 1px solid {palette['button_border']};
+                border-radius: 8px;
+                font-weight: 600;
+            }}
+            .stButton > button:hover {{
+                background: {palette['button_hover']};
+            }}
+
+            .stFormSubmitButton > button {{
+                background: {palette['button_bg']} !important;
+                color: {palette['button_text']} !important;
+                border: 1px solid {palette['button_border']} !important;
+                border-radius: 8px !important;
+                font-weight: 600 !important;
+            }}
+            .stFormSubmitButton > button:hover {{
+                background: {palette['button_hover']} !important;
+            }}
+
+            .stTabs [data-baseweb="tab-list"] {{
+                background: {palette['panel_bg']};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            .stTabs [data-baseweb="tab"] {{
+                color: {palette['muted_text']} !important;
+            }}
+            .stTabs [aria-selected="true"] {{
+                color: {palette['accent']} !important;
+                background: {palette['app_bg']};
+                border-radius: 6px;
+            }}
+
+            [data-testid="stChatMessage"] {{
+                background: {palette['panel_bg']};
+                border-radius: 12px;
+                padding: 12px;
+                margin: 8px 0;
+            }}
+
+            [data-testid='stBottomBlockContainer'],
+            [data-testid='stChatFloatingInputContainer'] {{
+                background: {palette['surface_bg']} !important;
+                border-top: 1px solid {palette['border']};
+                box-shadow: 0 -10px 30px rgba(17, 24, 39, 0.06);
+            }}
+
+            [data-testid='stChatInput'] {{
+                background: transparent !important;
+            }}
+
+            [data-testid='stSidebar'] .stButton > button {{
+                background: transparent;
+                color: {palette['text']};
+                border: 1px solid {palette['border']};
+            }}
+            [data-testid='stSidebar'] .stButton > button:hover {{
+                background: {palette['panel_bg']};
+                border-color: {palette['accent']};
+                color: {palette['accent']};
+            }}
+
+            [data-testid='stSidebar'] .stSubheader {{
+                color: {palette['text']} !important;
+            }}
+            [data-testid='stSidebar'] .stCaption {{
+                color: {palette['muted_text']} !important;
+            }}
+
+            .stMultiSelect [data-baseweb="select"] {{
+                background: {palette['input_bg']};
+            }}
+
+            [data-testid='stFileUploader'] {{
+                color: {palette['text']};
+            }}
+
+            [data-testid='stFileUploaderDropzone'] {{
+                background: {palette['surface_bg']} !important;
+                color: {palette['text']} !important;
+                border: 1px dashed {palette['border']} !important;
+                border-radius: 12px !important;
+            }}
+
+            [data-testid='stFileUploaderDropzone'] button {{
+                background: {palette['panel_bg']} !important;
+                color: {palette['text']} !important;
+                border: 1px solid {palette['border']} !important;
+            }}
+
+            [data-testid='stFileUploaderDropzone'] small,
+            [data-testid='stFileUploaderDropzone'] p {{
+                color: {palette['muted_text']} !important;
+            }}
+
+            .stAlert {{
+                background: {palette['panel_bg']};
+                color: {palette['text']};
+                border: 1px solid {palette['border']};
+                border-radius: 8px;
+            }}
+
+            .stForm {{
+                border: 1px solid {palette['border']};
+                border-radius: 12px;
+                padding: 24px;
+                background: {palette['surface_bg']};
+            }}
+
+            .psc {{
+                margin-top: 6px;
+                margin-bottom: 16px;
+            }}
+            .psc-bar {{
+                height: 5px;
+                border-radius: 3px;
+                width: 0%;
+                transition: width 0.3s, background-color 0.3s;
+                background: #ddd;
+            }}
+            .psc-text {{
+                font-size: 12px;
+                margin-top: 4px;
+                font-weight: 500;
+            }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -92,6 +290,69 @@ def inject_theme_styles(theme_mode: str) -> None:
 
 
 inject_theme_styles(get_theme_mode())
+
+
+def inject_password_strength_js():
+    st.markdown(
+        """
+        <script>
+        (function() {
+            function checkStrength(pw) {
+                if (!pw) return -1;
+                var score = 0;
+                if (pw.length >= 8) score++;
+                if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
+                if (/[0-9]/.test(pw)) score++;
+                if (/[^A-Za-z0-9]/.test(pw)) score++;
+                return score;
+            }
+            function getStrengthInfo(score) {
+                if (score === -1) return { label: '', color: '#ddd', width: '0%' };
+                var levels = [
+                    { label: 'Weak', color: '#ef4444', width: '25%' },
+                    { label: 'Fair', color: '#f59e0b', width: '50%' },
+                    { label: 'Good', color: '#84cc16', width: '75%' },
+                    { label: 'Strong', color: '#22c55e', width: '100%' }
+                ];
+                return levels[score] || levels[0];
+            }
+            function watchInputs() {
+                var uid = 0;
+                var inputs = document.querySelectorAll('input[type="password"]');
+                inputs.forEach(function(input) {
+                    if (input.dataset.strengthWatched) return;
+                    input.dataset.strengthWatched = 'true';
+                    uid++;
+                    var cid = 'psc-' + uid;
+                    var container = document.createElement('div');
+                    container.id = cid;
+                    container.className = 'psc';
+                    container.style.display = 'none';
+                    var bar = document.createElement('div');
+                    bar.className = 'psc-bar';
+                    var text = document.createElement('div');
+                    text.className = 'psc-text';
+                    container.appendChild(bar);
+                    container.appendChild(text);
+                    input.parentElement.appendChild(container);
+
+                    input.addEventListener('input', function() {
+                        var info = getStrengthInfo(checkStrength(this.value));
+                        bar.style.width = info.width;
+                        bar.style.backgroundColor = info.color;
+                        text.textContent = info.label;
+                        text.style.color = info.color;
+                        container.style.display = info.label ? 'block' : 'none';
+                    });
+                });
+            }
+            watchInputs();
+            setInterval(watchInputs, 1200);
+        })();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def request_user_service(method: str, endpoint: str, data=None, timeout: int = 8):
@@ -153,7 +414,23 @@ def login_or_register(username: str, password: str):
     st.error("Incorrect username/password")
 
 
+def password_strength_score(password: str) -> int:
+    score = 0
+    if len(password) >= 8:
+        score += 1
+    if re.search(r"[A-Z]", password) and re.search(r"[a-z]", password):
+        score += 1
+    if re.search(r"[0-9]", password):
+        score += 1
+    if re.search(r"[^A-Za-z0-9]", password):
+        score += 1
+    return score
+
+
 def register_user(username: str, password: str):
+    if password_strength_score(password) < 2:
+        st.error("Password is too weak. Use at least 8 characters with a mix of upper/lower case letters, numbers, and symbols.")
+        return
     resp = request_user_service(
         "POST", "/register", data={"username": username, "password": password}, timeout=8)
     if resp is not None and resp.ok:
@@ -231,6 +508,33 @@ def set_current_chat_history(messages):
             break
 
 
+def make_chat_title(prompt: str, max_length: int = 38) -> str:
+    title = " ".join(prompt.strip().split())
+    if not title:
+        return "New Chat"
+    return title if len(title) <= max_length else f"{title[:max_length - 1].rstrip()}…"
+
+
+def get_chat_display_title(session: dict) -> str:
+    title = session.get("title", "New Chat")
+    if title and title != "New Chat":
+        return title
+    for message in session.get("messages", []):
+        if message.get("role") == "user" and message.get("content"):
+            return make_chat_title(message["content"])
+    return "New Chat"
+
+
+def update_current_chat_title(prompt: str):
+    if not st.session_state.current_session_id:
+        return
+    for session in st.session_state.chat_sessions:
+        if session["id"] == st.session_state.current_session_id:
+            if session.get("title", "New Chat") == "New Chat":
+                session["title"] = make_chat_title(prompt)
+            break
+
+
 def get_current_selected_docs():
     if not st.session_state.current_session_id:
         return []
@@ -247,6 +551,13 @@ def set_current_selected_docs(selected_docs):
         if session["id"] == st.session_state.current_session_id:
             session["selected_docs"] = selected_docs
             break
+
+
+def get_doc_display_name(file_id: str) -> str:
+    for event in st.session_state.upload_events:
+        if event.get("file_id") == file_id:
+            return event.get("filename") or file_id
+    return file_id
 
 
 def upload_to_backend(uploaded_file):
@@ -346,6 +657,7 @@ def save_chat_to_backend():
 
 if not st.session_state.logged_in:
     palette = THEME_PALETTES[get_theme_mode()]
+    inject_password_strength_js()
     st.title("🔮 RAG Assistant")
 
     tab_login, tab_signup = st.tabs(["Sign In", "Sign Up"])
@@ -392,7 +704,7 @@ else:
             st.caption("No chats yet")
         else:
             for session in st.session_state.chat_sessions:
-                title = session.get("title", "New Chat")
+                title = get_chat_display_title(session)
                 st.button(
                     title,
                     key=f"chat_{session['id']}",
@@ -428,6 +740,7 @@ else:
                 "Select sources for this chat:",
                 st.session_state.uploaded_docs,
                 key=widget_key,
+                format_func=get_doc_display_name,
             )
             set_current_selected_docs(selected_docs)
         else:
@@ -452,6 +765,7 @@ else:
             st.warning("Please select at least one source")
         else:
             current_chat.append({"role": "user", "content": prompt})
+            update_current_chat_title(prompt)
             set_current_chat_history(current_chat)
 
             with st.chat_message("user"):
