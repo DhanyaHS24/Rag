@@ -121,7 +121,7 @@ services:
       GARNET_URL: garnet:6379
       EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-local}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
       JWT_SECRET: ${JWT_SECRET}
     restart: unless-stopped
 

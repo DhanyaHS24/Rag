@@ -1,5 +1,6 @@
 import os
 import asyncio
+import traceback
 from typing import List, Optional
 
 import chromadb
@@ -11,6 +12,10 @@ from shared.db_logger import log_action
 
 CHROMA_URL = os.getenv("CHROMA_URL", "chromadb")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 COLLECTION_NAME = get_collection_name("documents")
 
@@ -65,9 +70,8 @@ async def get_relevant_chunks(query: str, selected_docs: Optional[List[str]], us
     return docs[:3]
 
 
-def _generate_with_gemini(prompt: str, api_key: str) -> str:
-    genai.configure(api_key=api_key)
-    model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+def _generate_with_gemini(prompt: str) -> str:
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     model = genai.GenerativeModel(model_name)
     return model.generate_content(prompt).text
 
@@ -83,18 +87,19 @@ async def generate_response(query: str, contexts: List[str], api_key: str, cid: 
     )
 
     if not api_key:
-        return "I cannot answer this based on the provided documents."
+        return "[No Gemini API key configured. Set GEMINI_API_KEY in .env to enable AI-powered answers.]"
 
     try:
-        answer = await asyncio.to_thread(_generate_with_gemini, prompt, api_key)
+        answer = await asyncio.to_thread(_generate_with_gemini, prompt)
         return answer.strip()
     except Exception as e:
+        tb = traceback.format_exc()
         log_action(
             service="retrieval_service",
             action="gemini_error",
-            payload={"error": str(e)},
+            payload={"error": str(e), "traceback": tb},
             correlation_id=cid,
             status="failed",
             error=str(e),
         )
-        return "I cannot answer this based on the provided documents."
+        return f"[Gemini API error: {str(e)[:200]}]"
